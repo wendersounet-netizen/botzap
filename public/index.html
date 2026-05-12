@@ -705,6 +705,15 @@ body {
                 </div>
             </div>
         </div>
+        <div class="log-panel" style="height:240px;margin-top:14px">
+            <div class="log-head">
+                <span class="log-title">Log da Apify</span>
+                <div class="log-ctrl">
+                    <button class="log-btn" onclick="clearApifyLogs()">limpar</button>
+                </div>
+            </div>
+            <div class="log-body" id="apify-log"></div>
+        </div>
     </div>
 </div>
 
@@ -741,7 +750,7 @@ const S = {
     selected: null,
     logs: {},      // phoneId → [{type,message,time}]
     histCat: 'enviado',
-    apify: { runId: null, polling: null }
+    apify: { runId: null, polling: null, importedRuns: new Set(), logs: [] }
 };
 
 // ─── SOCKET ───────────────────────────────────────────────────────────────
@@ -804,6 +813,10 @@ socket.on('apify:update', (run) => {
 
 socket.on('apify:batch', (batch) => {
     updateApifyBatch(batch);
+});
+
+socket.on('apify:log', (entry) => {
+    addApifyLog(entry);
 });
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────
@@ -1069,6 +1082,8 @@ async function loadApifyState() {
     document.getElementById('apify-token').placeholder = d.hasToken ? 'Token salvo localmente' : 'Cole uma vez para salvar localmente';
     if (d.runs && d.runs[0]) updateApifyRun(d.runs[0]);
     if (d.batch) updateApifyBatch(d.batch);
+    S.apify.logs = d.logs || [];
+    renderApifyLogs();
 }
 async function saveApifyToken() {
     const token = document.getElementById('apify-token').value.trim();
@@ -1109,6 +1124,10 @@ function updateApifyRun(run) {
     document.getElementById('apify-run-status').textContent =
         `${run.status || 'UNKNOWN'}${run.imported ? ` - ${run.imported}/${run.total} importados` : ''}`;
     document.getElementById('apify-import-btn').style.display = run.status === 'SUCCEEDED' ? '' : 'none';
+    if (run.status === 'SUCCEEDED' && !S.apify.importedRuns.has(run.id)) {
+        S.apify.importedRuns.add(run.id);
+        importApifyRun(true);
+    }
 }
 function pollApifyRun(id) {
     clearInterval(S.apify.polling);
@@ -1120,7 +1139,7 @@ function pollApifyRun(id) {
         if (['SUCCEEDED','FAILED','ABORTED','TIMED-OUT'].includes(d.status)) clearInterval(S.apify.polling);
     }, 10000);
 }
-async function importApifyRun() {
+async function importApifyRun(auto = false) {
     if (!S.apify.runId) return;
     const r = await fetch(`/api/apify/run/${S.apify.runId}/import`, {
         method:'POST', headers:{'Content-Type':'application/json'},
@@ -1130,7 +1149,21 @@ async function importApifyRun() {
     if (!r.ok) return toast(d.error || 'Erro ao importar leads', 'err');
     S.config.arquivoCSV = d.fileName;
     document.getElementById('cfg-csv').value = d.fileName;
-    toast(`${d.imported} leads importados para ${d.fileName}`, 'ok');
+    toast(`${d.imported} leads importados para ${d.fileName}${auto ? ' automaticamente' : ''}`, 'ok');
+}
+function addApifyLog(entry) {
+    S.apify.logs.unshift(entry);
+    if (S.apify.logs.length > 300) S.apify.logs.length = 300;
+    renderApifyLogs();
+}
+function renderApifyLogs() {
+    const el = document.getElementById('apify-log');
+    if (!el) return;
+    el.innerHTML = (S.apify.logs || []).map(logRowHtml).join('');
+}
+function clearApifyLogs() {
+    S.apify.logs = [];
+    renderApifyLogs();
 }
 function listFromTextarea(id) {
     return document.getElementById(id).value
