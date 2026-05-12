@@ -6,6 +6,7 @@ const csv = require('csv-parser');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const QRCode = require('qrcode');
 const path = require('path');
+const https = require('https');
 
 const app = express();
 const server = http.createServer(app);
@@ -18,19 +19,73 @@ app.use(express.static(path.join(__dirname, 'public')));
 const PHONES_FILE  = path.join(__dirname, 'phones.json');
 const DB_FILE      = path.join(__dirname, 'registro_contatos.json');
 const CONFIG_FILE  = path.join(__dirname, 'config.json');
+const APIFY_TOKEN_FILE = path.join(__dirname, '.apify_token');
+const APIFY_BASE_URL = 'api.apify.com';
+const APIFY_DEFAULT_ACTOR_ID = 'nwua9Gu5YrADL7ZDj';
+
+const DEFAULT_APIFY_INPUT = {
+    includeWebResults: true,
+    language: 'pt-BR',
+    maxCrawledPlacesPerSearch: 200,
+    maxImages: 0,
+    maxQuestions: 0,
+    maxReviews: 0,
+    maximumLeadsEnrichmentRecords: 0,
+    placeMinimumStars: 'four',
+    reviewsOrigin: 'all',
+    reviewsSort: 'newest',
+    scrapeContacts: true,
+    scrapeDirectories: true,
+    scrapePlaceDetailPage: true,
+    scrapeSocialMediaProfiles: {
+        facebooks: true,
+        instagrams: true,
+        tiktoks: false
+    },
+    searchMatching: 'all',
+    searchStringsArray: [
+        'Segurança do Trabalho São Paulo', 'SST São Paulo', 'Medicina do Trabalho São Paulo', 'Treinamento NR São Paulo',
+        'Segurança do Trabalho Campinas', 'SST Campinas', 'Medicina do Trabalho Campinas', 'Treinamento NR Campinas',
+        'Segurança do Trabalho Curitiba', 'SST Curitiba', 'Medicina do Trabalho Curitiba', 'Treinamento NR Curitiba',
+        'Segurança do Trabalho Londrina', 'SST Londrina', 'Medicina do Trabalho Londrina', 'Treinamento NR Londrina',
+        'Segurança do Trabalho Joinville', 'SST Joinville', 'Medicina do Trabalho Joinville', 'Treinamento NR Joinville',
+        'Segurança do Trabalho Florianópolis', 'SST Florianópolis', 'Medicina do Trabalho Florianópolis', 'Treinamento NR Florianópolis',
+        'Segurança do Trabalho Ribeirão Preto', 'SST Ribeirão Preto', 'Medicina Ocupacional Ribeirão Preto', 'Consultoria NR Ribeirão Preto',
+        'Segurança do Trabalho Sorocaba', 'SST Sorocaba', 'Medicina Ocupacional Sorocaba', 'Consultoria NR Sorocaba',
+        'Segurança do Trabalho São José dos Campos', 'SST São José dos Campos', 'Medicina Ocupacional São José dos Campos', 'Consultoria NR São José dos Campos',
+        'Segurança do Trabalho Caxias do Sul', 'SST Caxias do Sul', 'Medicina Ocupacional Caxias do Sul', 'Consultoria NR Caxias do Sul',
+        'Segurança do Trabalho Blumenau', 'SST Blumenau', 'Medicina Ocupacional Blumenau', 'Consultoria NR Blumenau',
+        'Segurança do Trabalho Cascavel', 'SST Cascavel', 'Medicina Ocupacional Cascavel', 'Consultoria NR Cascavel',
+        'Segurança do Trabalho Ponta Grossa', 'SST Ponta Grossa', 'Medicina Ocupacional Ponta Grossa', 'Consultoria NR Ponta Grossa',
+        'Segurança do Trabalho Jundiaí', 'SST Jundiaí', 'Medicina Ocupacional Jundiaí', 'Consultoria NR Jundiaí',
+        'Segurança do Trabalho Piracicaba', 'SST Piracicaba', 'Medicina Ocupacional Piracicaba', 'Consultoria NR Piracicaba',
+        'Segurança do Trabalho Bauru', 'SST Bauru', 'Medicina Ocupacional Bauru', 'Consultoria NR Bauru',
+        'Segurança do Trabalho Chapecó', 'SST Chapecó', 'Medicina Ocupacional Chapecó', 'Consultoria NR Chapecó',
+        'Segurança do Trabalho Itajaí', 'SST Itajaí', 'Medicina Ocupacional Itajaí', 'Consultoria NR Itajaí',
+        'Segurança do Trabalho Balneário Camboriú', 'SST Balneário Camboriú', 'Medicina Ocupacional Balneário', 'Consultoria NR Balneário',
+        'Segurança do Trabalho São Bernardo do Campo', 'SST São Bernardo', 'Medicina Ocupacional São Bernardo', 'Consultoria NR São Bernardo'
+    ],
+    skipClosedPlaces: true,
+    verifyLeadsEnrichmentEmails: false,
+    website: 'allPlaces',
+    allPlacesNoSearchAction: ''
+};
 
 const DEFAULT_CONFIG = {
     mensagem: `Olá, tudo bem? Me chamo Wender e trabalho com o posicionamento digital de profissionais liberais.\n\nEstava analisando o perfil da {nome} em {cidade} e notei que vocês ainda não possuem um site institucional ou Landing Page de autoridade. No setor jurídico, a falta de uma vitrine oficial acaba passando menos segurança para novos clientes que buscam especialistas no Google.\n\nEu desenvolvo sites de alto padrão que ajudam a transmitir mais credibilidade e facilitam o fechamento de contratos de maior valor. Teria 2 minutos para eu te mostrar como isso pode impactar a sua advocacia?`,
     limiteDiario: 40,
     pausaEntreMensagens: 90,
     pausaInicial: 45,
-    arquivoCSV: 'advocacia1.csv'
+    arquivoCSV: 'advocacia1.csv',
+    apifyActorId: APIFY_DEFAULT_ACTOR_ID,
+    apifyOutputCSV: 'apify_leads.csv',
+    apifyInput: DEFAULT_APIFY_INPUT
 };
 
 // ─── HELPERS DE PERSISTÊNCIA ─────────────────────────────────────────────────
 function loadConfig() {
     if (!fs.existsSync(CONFIG_FILE)) fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2));
-    return JSON.parse(fs.readFileSync(CONFIG_FILE));
+    return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_FILE)) };
 }
 function saveConfig(c) { fs.writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2)); }
 
@@ -46,9 +101,123 @@ function loadDB() {
 }
 function saveDB(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
 
+function loadApifyToken() {
+    if (process.env.APIFY_TOKEN) return process.env.APIFY_TOKEN.trim();
+    if (!fs.existsSync(APIFY_TOKEN_FILE)) return '';
+    return fs.readFileSync(APIFY_TOKEN_FILE, 'utf8').trim();
+}
+
+function saveApifyToken(token) {
+    fs.writeFileSync(APIFY_TOKEN_FILE, String(token || '').trim());
+}
+
+function apifyRequest(method, apiPath, body = null) {
+    const token = loadApifyToken();
+    if (!token) {
+        return Promise.reject(new Error('Token da Apify nao configurado'));
+    }
+
+    const payload = body ? JSON.stringify(body) : '';
+    return new Promise((resolve, reject) => {
+        const req = https.request({
+            hostname: APIFY_BASE_URL,
+            method,
+            path: apiPath,
+            headers: {
+                Authorization: `Bearer ${token}`,
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(payload)
+            }
+        }, (response) => {
+            let raw = '';
+            response.on('data', chunk => raw += chunk);
+            response.on('end', () => {
+                let parsed = null;
+                try { parsed = raw ? JSON.parse(raw) : null; } catch (_) {}
+                if (response.statusCode >= 200 && response.statusCode < 300) {
+                    resolve(parsed);
+                } else {
+                    const msg = parsed?.error?.message || parsed?.message || raw || `HTTP ${response.statusCode}`;
+                    reject(new Error(msg));
+                }
+            });
+        });
+        req.on('error', reject);
+        if (payload) req.write(payload);
+        req.end();
+    });
+}
+
+function apifyActorPath(actorId) {
+    return encodeURIComponent(actorId).replace(/%7E/g, '~');
+}
+
+function safeCsvPath(fileName) {
+    const base = path.basename(String(fileName || 'apify_leads.csv'));
+    const finalName = base.toLowerCase().endsWith('.csv') ? base : `${base}.csv`;
+    return path.join(__dirname, finalName);
+}
+
+function csvEscape(value) {
+    const text = value == null ? '' : String(value);
+    return `"${text.replace(/"/g, '""')}"`;
+}
+
+function firstValue(...values) {
+    for (const value of values) {
+        if (Array.isArray(value) && value.length) return value[0];
+        if (value !== undefined && value !== null && value !== '') return value;
+    }
+    return '';
+}
+
+function categoryAt(item, index) {
+    if (Array.isArray(item.categories)) return item.categories[index] || '';
+    return item[`categories/${index}`] || '';
+}
+
+function normalizeApifyLead(item) {
+    return {
+        title: firstValue(item.title, item.name, item.placeName),
+        totalScore: firstValue(item.totalScore, item.rating, item.stars),
+        reviewsCount: firstValue(item.reviewsCount, item.reviews),
+        street: firstValue(item.street, item.address, item.location?.address),
+        city: firstValue(item.city, item.location?.city),
+        state: firstValue(item.state, item.location?.state),
+        countryCode: firstValue(item.countryCode, item.location?.countryCode),
+        website: firstValue(item.website, item.urlWebsite),
+        phone: firstValue(item.phoneUnformatted, item.phone, item.phoneNumber),
+        'categories/0': categoryAt(item, 0),
+        'categories/1': categoryAt(item, 1),
+        'categories/2': categoryAt(item, 2),
+        url: firstValue(item.url, item.placeUrl),
+        categoryName: firstValue(item.categoryName, item.category),
+        'emails/0': firstValue(item.emails, item.email),
+        'facebooks/0': firstValue(item.facebooks, item.facebook),
+        'instagrams/0': firstValue(item.instagrams, item.instagram)
+    };
+}
+
+function writeLeadsCsv(fileName, items) {
+    const headers = [
+        'title', 'totalScore', 'reviewsCount', 'street', 'city', 'state', 'countryCode',
+        'website', 'phone', 'categories/0', 'categories/1', 'categories/2', 'url',
+        'categoryName', 'emails/0', 'facebooks/0', 'instagrams/0'
+    ];
+    const rows = items.map(normalizeApifyLead).filter(item => item.title && item.phone);
+    const content = [
+        headers.map(csvEscape).join(','),
+        ...rows.map(row => headers.map(header => csvEscape(row[header])).join(','))
+    ].join('\n');
+    const filePath = safeCsvPath(fileName);
+    fs.writeFileSync(filePath, content, 'utf8');
+    return { fileName: path.basename(filePath), total: items.length, imported: rows.length };
+}
+
 // ─── ESTADO EM MEMÓRIA ───────────────────────────────────────────────────────
 // clients[id] = { client, status, campaign: null | { sent, startTime }, paused, stopped }
 const clients = {};
+const apifyRuns = {};
 
 // ─── HELPERS DE COMUNICAÇÃO ──────────────────────────────────────────────────
 function emit(event, data) { io.emit(event, data); }
@@ -356,6 +525,112 @@ app.post('/api/phones/:id/stop', (req, res) => {
 // Config
 app.get('/api/config',  (req, res) => res.json(loadConfig()));
 app.post('/api/config', (req, res) => { saveConfig(req.body); res.json({ ok: true }); });
+
+// Apify
+app.get('/api/apify/state', (req, res) => {
+    const config = loadConfig();
+    res.json({
+        hasToken: Boolean(loadApifyToken()),
+        actorId: config.apifyActorId || APIFY_DEFAULT_ACTOR_ID,
+        outputCSV: config.apifyOutputCSV || 'apify_leads.csv',
+        input: config.apifyInput || DEFAULT_APIFY_INPUT,
+        runs: Object.values(apifyRuns).sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))
+    });
+});
+
+app.post('/api/apify/token', (req, res) => {
+    const { token } = req.body || {};
+    if (!token || String(token).trim().length < 20) {
+        return res.status(400).json({ error: 'Token da Apify invalido' });
+    }
+    saveApifyToken(token);
+    res.json({ ok: true });
+});
+
+app.post('/api/apify/run', async (req, res) => {
+    const config = loadConfig();
+    const actorId = req.body?.actorId || config.apifyActorId || APIFY_DEFAULT_ACTOR_ID;
+    const runInput = req.body?.input || config.apifyInput || DEFAULT_APIFY_INPUT;
+    const outputCSV = req.body?.outputCSV || config.apifyOutputCSV || 'apify_leads.csv';
+
+    try {
+        const response = await apifyRequest('POST', `/v2/acts/${apifyActorPath(actorId)}/runs`, runInput);
+        const run = response.data || response;
+        apifyRuns[run.id] = {
+            id: run.id,
+            actorId,
+            outputCSV,
+            status: run.status,
+            defaultDatasetId: run.defaultDatasetId,
+            startedAt: run.startedAt || new Date().toISOString()
+        };
+
+        saveConfig({ ...config, apifyActorId: actorId, apifyInput: runInput, apifyOutputCSV: outputCSV });
+        emit('apify:update', apifyRuns[run.id]);
+        res.json(apifyRuns[run.id]);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.get('/api/apify/run/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const response = await apifyRequest('GET', `/v2/actor-runs/${encodeURIComponent(id)}`);
+        const run = response.data || response;
+        const snapshot = {
+            ...(apifyRuns[id] || {}),
+            id: run.id,
+            status: run.status,
+            statusMessage: run.statusMessage,
+            defaultDatasetId: run.defaultDatasetId,
+            startedAt: run.startedAt,
+            finishedAt: run.finishedAt,
+            stats: run.stats || null
+        };
+        apifyRuns[id] = snapshot;
+        emit('apify:update', snapshot);
+        res.json(snapshot);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
+
+app.post('/api/apify/run/:id/import', async (req, res) => {
+    const { id } = req.params;
+    try {
+        const runResponse = await apifyRequest('GET', `/v2/actor-runs/${encodeURIComponent(id)}`);
+        const run = runResponse.data || runResponse;
+        if (run.status !== 'SUCCEEDED') {
+            return res.status(400).json({ error: `Run ainda nao finalizada: ${run.status}` });
+        }
+
+        const datasetId = run.defaultDatasetId;
+        const itemsResponse = await apifyRequest(
+            'GET',
+            `/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json`
+        );
+        const config = loadConfig();
+        const outputCSV = req.body?.outputCSV || apifyRuns[id]?.outputCSV || config.apifyOutputCSV || 'apify_leads.csv';
+        const result = writeLeadsCsv(outputCSV, Array.isArray(itemsResponse) ? itemsResponse : []);
+        saveConfig({ ...config, arquivoCSV: result.fileName, apifyOutputCSV: result.fileName });
+
+        apifyRuns[id] = {
+            ...(apifyRuns[id] || {}),
+            id,
+            status: run.status,
+            defaultDatasetId: datasetId,
+            importedAt: new Date().toISOString(),
+            imported: result.imported,
+            total: result.total,
+            outputCSV: result.fileName
+        };
+        emit('apify:update', apifyRuns[id]);
+        res.json(result);
+    } catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
 
 // Stats + histórico
 app.get('/api/stats', (req, res) => res.json(statsSnapshot()));
