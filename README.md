@@ -332,6 +332,22 @@ Quando uma busca da Apify importa um CSV novo, o sistema atualiza o CSV ativo gl
 - Configuracoes globais continuam como fallback para telefones sem configuracao propria.
 - Apify continua global e, ao importar novo CSV, atualiza o CSV ativo de todos os telefones.
 
+### 2026-05-12 - Otimizacao de tokens da Apify
+
+- Adicionado modo economico para buscas da Apify.
+- O modo economico fica ativo por padrao e reduz o volume por regiao.
+- O lote passa a limitar a quantidade de termos buscados por regiao.
+- O input enviado para a Apify passa a desligar enriquecimentos caros quando o modo economico esta ativo:
+  - `includeWebResults: false`;
+  - `scrapeDirectories: false`;
+  - redes sociais desativadas;
+  - reviews, imagens e perguntas zeradas;
+  - minimo de 4 estrelas;
+  - maximo padrao de 80 lugares por termo.
+- O painel APIFY ganhou controles para ligar/desligar o modo economico e definir quantos termos usar por regiao.
+- O log da Apify agora informa quantos termos serao buscados por regiao.
+- Impacto: uma rodada que antes podia buscar 8 termos x 300 lugares por regiao passa, por padrao, para 4 termos x 80 lugares por regiao.
+
 ## Politica de Documentacao Continua
 
 Sempre que uma nova funcionalidade, ajuste ou correcao for finalizada, este README deve ser atualizado mantendo a linha do tempo.
