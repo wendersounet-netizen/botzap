@@ -453,6 +453,26 @@ body {
 }
 .form-input:focus, .form-textarea:focus { outline: none; border-color: var(--primary); }
 .form-textarea { resize: vertical; min-height: 120px; line-height: 1.6; }
+.check-row {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: var(--text);
+    font-size: 11px;
+    line-height: 1.35;
+}
+.check-row input {
+    width: 15px;
+    height: 15px;
+    accent-color: var(--primary);
+    flex-shrink: 0;
+}
+.hint {
+    color: var(--text2);
+    font-size: 10px;
+    line-height: 1.45;
+    margin-top: 6px;
+}
 
 .modal-foot { display:flex; gap:8px; justify-content:flex-end; margin-top:18px; }
 .btn-cancel  {
@@ -668,6 +688,17 @@ body {
         <div class="form-group">
             <label class="form-label">CSV de Saída</label>
             <input class="form-input" id="apify-csv" placeholder="apify_leads.csv" />
+        </div>
+        <div class="form-group">
+            <label class="check-row">
+                <input id="apify-economy" type="checkbox" checked />
+                <span>Modo economico: menos buscas e enriquecimentos caros</span>
+            </label>
+            <div class="hint">Recomendado para gastar menos tokens. Mantem telefone e dados principais.</div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Termos por Regiao no Modo Economico</label>
+            <input class="form-input" id="apify-max-terms" type="number" min="1" max="20" />
         </div>
         <div class="form-group">
             <label class="form-label">Input JSON</label>
@@ -1097,6 +1128,8 @@ async function loadApifyState() {
     document.getElementById('apify-terms').value = (d.segmentTerms || []).join('\n');
     document.getElementById('apify-regions').value = (d.regions || []).join('\n');
     document.getElementById('apify-max-runs').value = d.autoMaxRuns || 20;
+    document.getElementById('apify-economy').checked = d.economyMode !== false;
+    document.getElementById('apify-max-terms').value = d.maxTermsPerRegion || 4;
     document.getElementById('apify-token').placeholder = d.hasToken ? 'Token salvo localmente' : 'Cole uma vez para salvar localmente';
     if (d.runs && d.runs[0]) updateApifyRun(d.runs[0]);
     if (d.batch) updateApifyBatch(d.batch);
@@ -1126,7 +1159,8 @@ async function startApifyRun() {
         body: JSON.stringify({
             actorId: document.getElementById('apify-actor').value.trim(),
             outputCSV: document.getElementById('apify-csv').value.trim(),
-            input
+            input,
+            economyMode: document.getElementById('apify-economy').checked
         })
     });
     const d = await r.json();
@@ -1210,7 +1244,9 @@ async function startApifyBatch() {
             input,
             segmentTerms,
             regions,
-            maxRuns: parseInt(document.getElementById('apify-max-runs').value) || regions.length
+            maxRuns: parseInt(document.getElementById('apify-max-runs').value) || regions.length,
+            economyMode: document.getElementById('apify-economy').checked,
+            maxTermsPerRegion: parseInt(document.getElementById('apify-max-terms').value) || 4
         })
     });
     const d = await r.json();
