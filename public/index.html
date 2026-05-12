@@ -619,6 +619,10 @@ body {
     </div>
     <div class="drawer-body">
         <div class="form-group">
+            <label class="form-label">Telefone selecionado</label>
+            <input class="form-input" id="cfg-phone" disabled />
+        </div>
+        <div class="form-group">
             <label class="form-label">Arquivo CSV</label>
             <input class="form-input" id="cfg-csv" placeholder="advocacia1.csv" />
         </div>
@@ -786,6 +790,7 @@ socket.on('phone:update', (patch) => {
     if (p) Object.assign(p, patch);
     renderSidebar();
     if (S.selected === patch.id) renderMain();
+    if (S.selected === patch.id) loadSettingsForm();
 });
 
 socket.on('phone:removed', ({ id }) => {
@@ -851,6 +856,7 @@ function renderSidebar() {
 
     if (!S.phones.length) {
         list.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:11px">Nenhum telefone ainda</div>';
+        loadSettingsForm();
         return;
     }
 
@@ -876,6 +882,7 @@ function selectPhone(id) {
     S.selected = id;
     renderSidebar();
     renderMain();
+    loadSettingsForm();
 }
 
 // ─── MAIN CONTENT ─────────────────────────────────────────────────────────
@@ -883,6 +890,7 @@ function renderMain() {
     const wrap = document.getElementById('main-content');
 
     if (!S.selected) {
+        loadSettingsForm();
         wrap.innerHTML = `<div class="empty-view">
             <div class="empty-icon">📲</div>
             <div class="empty-txt">Selecione um telefone à esquerda</div>
@@ -893,7 +901,7 @@ function renderMain() {
     const p = phone(S.selected);
     if (!p) { S.selected = null; renderMain(); return; }
 
-    const limit  = S.config.limiteDiario || 40;
+    const limit  = p.config?.limiteDiario || S.config.limiteDiario || 40;
     const sent   = p.campaign?.sent || 0;
     const pct    = Math.min((sent / limit) * 100, 100).toFixed(1);
 
@@ -1030,13 +1038,16 @@ async function doAddPhone() {
 function openSettings() {
     document.getElementById('settings-drawer').classList.add('open');
     document.getElementById('settings-backdrop').classList.add('open');
+    loadSettingsForm();
 }
 function closeSettings() {
     document.getElementById('settings-drawer').classList.remove('open');
     document.getElementById('settings-backdrop').classList.remove('open');
 }
 function loadSettingsForm() {
-    const c = S.config;
+    const p = phone(S.selected);
+    const c = p?.config || S.config;
+    document.getElementById('cfg-phone').value = p ? `${p.label}${p.number ? ' +' + p.number : ''}` : 'Selecione um telefone';
     document.getElementById('cfg-csv').value   = c.arquivoCSV || '';
     document.getElementById('cfg-limit').value = c.limiteDiario || 40;
     document.getElementById('cfg-pause').value = c.pausaEntreMensagens || 90;
@@ -1044,20 +1055,27 @@ function loadSettingsForm() {
     document.getElementById('cfg-msg').value   = c.mensagem || '';
 }
 async function saveSettings() {
+    if (!S.selected) return toast('Selecione um telefone para salvar configurações', 'warn');
     const cfg = {
-        ...S.config,
         arquivoCSV:           document.getElementById('cfg-csv').value.trim(),
         limiteDiario:         parseInt(document.getElementById('cfg-limit').value),
         pausaEntreMensagens:  parseInt(document.getElementById('cfg-pause').value),
         pausaInicial:         parseInt(document.getElementById('cfg-sync').value),
-        mensagem:             document.getElementById('cfg-msg').value
+        mensagem:             document.getElementById('cfg-msg').value,
+        etiquetaArquivarBusiness: S.config.etiquetaArquivarBusiness !== false
     };
-    const r = await fetch('/api/config', {
+    const r = await fetch(`/api/phones/${S.selected}/config`, {
         method:'POST', headers:{'Content-Type':'application/json'},
         body: JSON.stringify(cfg)
     });
-    if (r.ok) { S.config = cfg; closeSettings(); toast('Configurações salvas!', 'ok'); }
-    else toast('Erro ao salvar', 'err');
+    const saved = await r.json();
+    if (r.ok) {
+        const p = phone(S.selected);
+        if (p) p.config = saved;
+        closeSettings();
+        renderMain();
+        toast('Configurações do telefone salvas!', 'ok');
+    } else toast(saved.error || 'Erro ao salvar', 'err');
 }
 
 // ─── HISTORY ──────────────────────────────────────────────────────────────
@@ -1148,6 +1166,9 @@ async function importApifyRun(auto = false) {
     const d = await r.json();
     if (!r.ok) return toast(d.error || 'Erro ao importar leads', 'err');
     S.config.arquivoCSV = d.fileName;
+    S.phones.forEach(p => {
+        p.config = { ...(p.config || S.config), arquivoCSV: d.fileName };
+    });
     document.getElementById('cfg-csv').value = d.fileName;
     toast(`${d.imported} leads importados para ${d.fileName}${auto ? ' automaticamente' : ''}`, 'ok');
 }
