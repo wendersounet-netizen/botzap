@@ -71,6 +71,25 @@ const DEFAULT_APIFY_INPUT = {
     allPlacesNoSearchAction: ''
 };
 
+const APIFY_ECONOMY_INPUT_PATCH = {
+    includeWebResults: false,
+    maxCrawledPlacesPerSearch: 80,
+    maxImages: 0,
+    maxQuestions: 0,
+    maxReviews: 0,
+    maximumLeadsEnrichmentRecords: 0,
+    placeMinimumStars: 'four',
+    scrapeContacts: true,
+    scrapeDirectories: false,
+    scrapePlaceDetailPage: true,
+    scrapeSocialMediaProfiles: {
+        facebooks: false,
+        instagrams: false,
+        tiktoks: false
+    },
+    verifyLeadsEnrichmentEmails: false
+};
+
 const DEFAULT_APIFY_SEGMENT_TERMS = [
     'Segurança do Trabalho',
     'SST',
@@ -122,6 +141,8 @@ const DEFAULT_CONFIG = {
     apifySegmentTerms: DEFAULT_APIFY_SEGMENT_TERMS,
     apifyRegions: DEFAULT_APIFY_REGIONS,
     apifyAutoMaxRuns: 20,
+    apifyEconomyMode: true,
+    apifyMaxSearchTermsPerRegion: 4,
     etiquetaArquivarBusiness: true
 };
 
@@ -367,11 +388,34 @@ function normalizeList(value, fallback = []) {
     return items.length ? items : fallback;
 }
 
-function buildRegionalApifyInput(baseInput, segmentTerms, region) {
-    const terms = normalizeList(segmentTerms, DEFAULT_APIFY_SEGMENT_TERMS);
-    return {
+function optimizeApifyInput(input, economyMode = true) {
+    const base = {
         ...DEFAULT_APIFY_INPUT,
-        ...(baseInput || {}),
+        ...(input || {})
+    };
+    if (!economyMode) return base;
+    return {
+        ...base,
+        ...APIFY_ECONOMY_INPUT_PATCH,
+        scrapeSocialMediaProfiles: {
+            ...(base.scrapeSocialMediaProfiles || {}),
+            ...APIFY_ECONOMY_INPUT_PATCH.scrapeSocialMediaProfiles
+        }
+    };
+}
+
+function limitSearchTerms(terms, economyMode = true, maxTermsPerRegion = 4) {
+    const normalized = normalizeList(terms, DEFAULT_APIFY_SEGMENT_TERMS);
+    if (!economyMode) return normalized;
+    const limit = Math.max(1, Math.min(Number(maxTermsPerRegion || 4), normalized.length));
+    return normalized.slice(0, limit);
+}
+
+function buildRegionalApifyInput(baseInput, segmentTerms, region, options = {}) {
+    const economyMode = options.economyMode !== false;
+    const terms = limitSearchTerms(segmentTerms, economyMode, options.maxTermsPerRegion);
+    return {
+        ...optimizeApifyInput(baseInput, economyMode),
         searchStringsArray: terms.map(term => `${term} ${region}`)
     };
 }
@@ -551,6 +595,9 @@ async function runApifyBatch(options) {
     const regions = normalizeList(options.regions, config.apifyRegions || DEFAULT_APIFY_REGIONS);
     const maxRuns = Math.max(1, Math.min(Number(options.maxRuns || config.apifyAutoMaxRuns || 20), regions.length));
     const baseInput = options.input || config.apifyInput || DEFAULT_APIFY_INPUT;
+    const economyMode = options.economyMode !== undefined ? Boolean(options.economyMode) : config.apifyEconomyMode !== false;
+    const maxTermsPerRegion = Math.max(1, Number(options.maxTermsPerRegion || config.apifyMaxSearchTermsPerRegion || 4));
+    const activeTerms = limitSearchTerms(segmentTerms, economyMode, maxTermsPerRegion);
 
     Object.assign(apifyBatch, {
         running: true,
@@ -567,20 +614,29 @@ async function runApifyBatch(options) {
         error: null,
         outputCSV,
         regions: regions.slice(0, maxRuns),
+        economyMode,
+        maxTermsPerRegion,
+        termsPerRegion: activeTerms.length,
         logs: []
     });
     apifyLog('info', `Lote iniciado: ${maxRuns} regioes, CSV ${outputCSV}`);
+    apifyLog('info', economyMode
+        ? `Modo economico ativo: ${activeTerms.length} termos x ate ${APIFY_ECONOMY_INPUT_PATCH.maxCrawledPlacesPerSearch} lugares por regiao`
+        : `Modo economico desligado: ${segmentTerms.length} termos por regiao`);
     emitApifyBatch();
 
+    const savedInput = optimizeApifyInput(baseInput, economyMode);
     saveConfig({
         ...config,
         arquivoCSV: outputCSV,
         apifyActorId: actorId,
         apifyOutputCSV: outputCSV,
-        apifyInput: baseInput,
+        apifyInput: savedInput,
         apifySegmentTerms: segmentTerms,
         apifyRegions: regions,
-        apifyAutoMaxRuns: maxRuns
+        apifyAutoMaxRuns: maxRuns,
+        apifyEconomyMode: economyMode,
+        apifyMaxSearchTermsPerRegion: maxTermsPerRegion
     });
 
     try {
@@ -591,7 +647,8 @@ async function runApifyBatch(options) {
             apifyLog('info', `Iniciando busca em ${region}`);
             emitApifyBatch();
 
-            const regionalInput = buildRegionalApifyInput(baseInput, segmentTerms, region);
+            const regionalInput = buildRegionalApifyInput(baseInput, segmentTerms, region, { economyMode, maxTermsPerRegion });
+            apifyLog('info', `Buscando ${regionalInput.searchStringsArray.length} termos em ${region}`);
             const response = await apifyRequest('POST', `/v2/acts/${apifyActorPath(actorId)}/runs`, regionalInput);
             const run = response.data || response;
             apifyLog('info', `Run ${run.id} criada para ${region}`);
@@ -967,14 +1024,17 @@ app.post('/api/phones/:id/config', (req, res) => {
 // Apify
 app.get('/api/apify/state', (req, res) => {
     const config = loadConfig();
+    const economyMode = config.apifyEconomyMode !== false;
     res.json({
         hasToken: Boolean(loadApifyToken()),
         actorId: config.apifyActorId || APIFY_DEFAULT_ACTOR_ID,
         outputCSV: config.apifyOutputCSV || 'apify_leads.csv',
-        input: config.apifyInput || DEFAULT_APIFY_INPUT,
+        input: optimizeApifyInput(config.apifyInput || DEFAULT_APIFY_INPUT, economyMode),
         segmentTerms: config.apifySegmentTerms || DEFAULT_APIFY_SEGMENT_TERMS,
         regions: config.apifyRegions || DEFAULT_APIFY_REGIONS,
         autoMaxRuns: config.apifyAutoMaxRuns || 20,
+        economyMode,
+        maxTermsPerRegion: config.apifyMaxSearchTermsPerRegion || 4,
         batch: { ...apifyBatch },
         logs: apifyBatch.logs || [],
         runs: Object.values(apifyRuns).sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))
@@ -993,11 +1053,12 @@ app.post('/api/apify/token', (req, res) => {
 app.post('/api/apify/run', async (req, res) => {
     const config = loadConfig();
     const actorId = req.body?.actorId || config.apifyActorId || APIFY_DEFAULT_ACTOR_ID;
-    const runInput = req.body?.input || config.apifyInput || DEFAULT_APIFY_INPUT;
+    const economyMode = req.body?.economyMode !== undefined ? Boolean(req.body.economyMode) : config.apifyEconomyMode !== false;
+    const runInput = optimizeApifyInput(req.body?.input || config.apifyInput || DEFAULT_APIFY_INPUT, economyMode);
     const outputCSV = req.body?.outputCSV || config.apifyOutputCSV || 'apify_leads.csv';
 
     try {
-        apifyLog('info', `Iniciando busca unica no actor ${actorId}`);
+        apifyLog('info', `Iniciando busca unica no actor ${actorId}${economyMode ? ' em modo economico' : ''}`);
         const response = await apifyRequest('POST', `/v2/acts/${apifyActorPath(actorId)}/runs`, runInput);
         const run = response.data || response;
         apifyLog('info', `Run ${run.id} criada`);
@@ -1010,7 +1071,7 @@ app.post('/api/apify/run', async (req, res) => {
             startedAt: run.startedAt || new Date().toISOString()
         };
 
-        saveConfig({ ...config, apifyActorId: actorId, apifyInput: runInput, apifyOutputCSV: outputCSV });
+        saveConfig({ ...config, apifyActorId: actorId, apifyInput: runInput, apifyOutputCSV: outputCSV, apifyEconomyMode: economyMode });
         emit('apify:update', apifyRuns[run.id]);
         res.json(apifyRuns[run.id]);
     } catch (err) {
