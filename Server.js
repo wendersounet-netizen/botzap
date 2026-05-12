@@ -97,9 +97,81 @@ function savePhones(p) { fs.writeFileSync(PHONES_FILE, JSON.stringify(p, null, 2
 
 function loadDB() {
     if (!fs.existsSync(DB_FILE)) fs.writeFileSync(DB_FILE, JSON.stringify({ enviado: [], invalido: [], erro: [] }, null, 2));
-    return JSON.parse(fs.readFileSync(DB_FILE));
+    const db = JSON.parse(fs.readFileSync(DB_FILE));
+    for (const key of ['enviado', 'invalido', 'erro', 'reservado']) {
+        if (!Array.isArray(db[key])) db[key] = [];
+    }
+    const reservationCutoff = Date.now() - (12 * 60 * 60 * 1000);
+    db.reservado = db.reservado.filter(item => {
+        if (item.status !== 'active') return true;
+        const reservedAt = new Date(item.data || 0).getTime();
+        return reservedAt && reservedAt > reservationCutoff;
+    });
+    return db;
 }
 function saveDB(db) { fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2)); }
+
+function normalizePhoneNumber(phone) {
+    let numero = String(phone || '').replace(/\D/g, '');
+    if (numero && !numero.startsWith('55')) numero = '55' + numero;
+    return numero;
+}
+
+function todayKey(date = new Date()) {
+    return date.toLocaleDateString('sv-SE');
+}
+
+function isToday(isoDate) {
+    if (!isoDate) return false;
+    return todayKey(new Date(isoDate)) === todayKey();
+}
+
+function sentTodayByPhone(db, phoneId) {
+    return db.enviado.filter(item => item.phoneId === phoneId && isToday(item.data)).length;
+}
+
+function isProcessedNumber(db, numero) {
+    return db.enviado.some(item => item.numero === numero) ||
+           db.invalido.some(item => item.numero === numero) ||
+           db.erro.some(item => item.numero === numero);
+}
+
+function reserveLead(numero, lead, phoneId) {
+    const db = loadDB();
+    if (isProcessedNumber(db, numero)) return { ok: false, reason: 'processed' };
+
+    const activeReservation = db.reservado.find(item => item.numero === numero && item.status === 'active');
+    if (activeReservation && activeReservation.phoneId !== phoneId) {
+        return { ok: false, reason: 'reserved', phoneId: activeReservation.phoneId };
+    }
+    if (!activeReservation) {
+        db.reservado.push({
+            numero,
+            nome: lead.nome,
+            phoneId,
+            data: new Date().toISOString(),
+            status: 'active'
+        });
+        saveDB(db);
+    }
+    return { ok: true };
+}
+
+function finalizeLead(tipo, numero, lead, phoneId) {
+    const db = loadDB();
+    if (!db[tipo].some(item => item.numero === numero)) {
+        db[tipo].push({ numero, nome: lead.nome, data: new Date().toISOString(), phoneId });
+    }
+    db.reservado = db.reservado.filter(item => !(item.numero === numero && item.phoneId === phoneId));
+    saveDB(db);
+}
+
+function releaseReservationsByPhone(phoneId) {
+    const db = loadDB();
+    const before = db.reservado.length;
+    db.reservado = db.reservado.filter(item => !(item.phoneId === phoneId && item.status === 'active'));
+    if (db.reservado.length !== before) saveDB(db);
+}
 
 function loadApifyToken() {
     if (process.env.APIFY_TOKEN) return process.env.APIFY_TOKEN.trim();
@@ -281,6 +353,7 @@ async function initializePhone(phoneData) {
     client.on('disconnected', (reason) => {
         clients[id].status = 'disconnected';
         clients[id].campaign = null;
+        releaseReservationsByPhone(id);
         emit('phone:update', { id, status: 'disconnected', campaign: null });
         log(id, 'warn', `🔌 Desconectado: ${reason}`);
     });
@@ -304,15 +377,17 @@ async function initializePhone(phoneData) {
 async function runCampaign(phoneId) {
     const config = loadConfig();
     const cd = clients[phoneId];
+    const LIMITE = Number(config.limiteDiario) || 40;
+    let disparos = sentTodayByPhone(loadDB(), phoneId);
 
-    cd.campaign = { sent: 0, startTime: new Date().toISOString() };
+    cd.campaign = { sent: disparos, startTime: new Date().toISOString() };
     cd.paused   = false;
     cd.stopped  = false;
     emit('phone:update', { id: phoneId, campaign: cd.campaign, paused: false });
 
     const isStopped = () => cd.stopped;
 
-    log(phoneId, 'info', `🚀 Campanha iniciada. Sincronizando (${config.pausaInicial}s)...`);
+    log(phoneId, 'info', `Campanha iniciada. Hoje este telefone ja enviou ${disparos}/${LIMITE}. Sincronizando (${config.pausaInicial}s)...`);
     if (await waitMs(config.pausaInicial * 1000, isStopped)) {
         log(phoneId, 'warn', '⏹️ Campanha encerrada durante sincronização.');
         cd.campaign = null;
@@ -330,12 +405,12 @@ async function runCampaign(phoneId) {
         return;
     }
 
-    let disparos = 0;
-    const LIMITE = config.limiteDiario;
-
     for (const lead of contatos) {
         if (isStopped()) { log(phoneId, 'warn', '⏹️ Campanha encerrada.'); break; }
-        if (disparos >= LIMITE) { log(phoneId, 'info', `🏁 Limite de ${LIMITE} disparos atingido.`); break; }
+        disparos = sentTodayByPhone(loadDB(), phoneId);
+        cd.campaign.sent = disparos;
+        emit('phone:update', { id: phoneId, campaign: { ...cd.campaign } });
+        if (disparos >= LIMITE) { log(phoneId, 'info', `Limite diario de ${LIMITE} disparos atingido.`); break; }
 
         // aguarda se pausado
         while (cd.paused && !isStopped()) {
@@ -343,16 +418,18 @@ async function runCampaign(phoneId) {
         }
         if (isStopped()) break;
 
-        let numero = String(lead.telefone).replace(/\D/g, '');
-        if (!numero.startsWith('55')) numero = '55' + numero;
+        const numero = normalizePhoneNumber(lead.telefone);
+        if (!numero) continue;
         const idZap = `${numero}@c.us`;
 
-        // verifica memória central
-        const db = loadDB();
-        const jaFeito = db.enviado.some(i => i.numero === numero) ||
-                        db.invalido.some(i => i.numero === numero) ||
-                        db.erro.some(i => i.numero === numero);
-        if (jaFeito) { log(phoneId, 'skip', `⏭️ Ignorando ${lead.nome} (já na memória)`); continue; }
+        const reserva = reserveLead(numero, lead, phoneId);
+        if (!reserva.ok) {
+            const msg = reserva.reason === 'reserved'
+                ? `Ignorando ${lead.nome} (reservado por outro telefone)`
+                : `Ignorando ${lead.nome} (ja na memoria)`;
+            log(phoneId, 'skip', msg);
+            continue;
+        }
 
         try {
             const registered = await cd.client.isRegisteredUser(idZap);
@@ -363,12 +440,9 @@ async function runCampaign(phoneId) {
                     .replace(/\{cidade\}/g, lead.cidade || 'sua região');
 
                 await cd.client.sendMessage(idZap, msg);
-                disparos++;
+                finalizeLead('enviado', numero, lead, phoneId);
+                disparos = sentTodayByPhone(loadDB(), phoneId);
                 cd.campaign.sent = disparos;
-
-                const db2 = loadDB();
-                db2.enviado.push({ numero, nome: lead.nome, data: new Date().toISOString(), phoneId });
-                saveDB(db2);
 
                 emit('phone:update', { id: phoneId, campaign: { ...cd.campaign } });
                 emit('stats:update', statsSnapshot());
@@ -379,16 +453,12 @@ async function runCampaign(phoneId) {
                     await waitMs(config.pausaEntreMensagens * 1000, isStopped);
                 }
             } else {
-                const db2 = loadDB();
-                db2.invalido.push({ numero, nome: lead.nome, data: new Date().toISOString() });
-                saveDB(db2);
+                finalizeLead('invalido', numero, lead, phoneId);
                 emit('stats:update', statsSnapshot());
                 log(phoneId, 'invalid', `❌ ${lead.nome} não tem WhatsApp`);
             }
         } catch (e) {
-            const db2 = loadDB();
-            db2.erro.push({ numero, nome: lead.nome, data: new Date().toISOString() });
-            saveDB(db2);
+            finalizeLead('erro', numero, lead, phoneId);
             emit('stats:update', statsSnapshot());
             log(phoneId, 'error', `⚠️ Erro com ${lead.nome}: ${e.message}`);
             await waitMs(5000, isStopped);
@@ -397,6 +467,7 @@ async function runCampaign(phoneId) {
 
     cd.campaign = null;
     cd.stopped  = false;
+    releaseReservationsByPhone(phoneId);
     emit('phone:update', { id: phoneId, campaign: null, paused: false });
     log(phoneId, 'success', '🏁 Operação finalizada! Memória sincronizada.');
 }
@@ -478,6 +549,7 @@ app.delete('/api/phones/:id', async (req, res) => {
         try { await clients[id].client.destroy(); } catch (_) {}
         delete clients[id];
     }
+    releaseReservationsByPhone(id);
     savePhones(loadPhones().filter(p => p.id !== id));
     emit('phone:removed', { id });
     res.json({ ok: true });
