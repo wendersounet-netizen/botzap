@@ -566,6 +566,7 @@ body {
             <span id="ws-txt">conectando...</span>
         </div>
         <div class="topbar-divider"></div>
+        <button class="topbtn" onclick="openApify()">APIFY</button>
         <button class="topbtn" onclick="openHistory()">📋 Histórico</button>
         <button class="topbtn" onclick="openSettings()">⚙ Configurações</button>
     </div>
@@ -642,6 +643,47 @@ body {
 </div>
 
 <!-- ─── HISTORY DRAWER ────────────────────────────────────────────────────── -->
+<!-- APIFY DRAWER -->
+<div class="drawer-backdrop" id="apify-backdrop" onclick="closeApify()"></div>
+<div class="drawer" id="apify-drawer">
+    <div class="drawer-head">
+        <div class="drawer-title">APIFY LEADS</div>
+        <button class="drawer-close" onclick="closeApify()">×</button>
+    </div>
+    <div class="drawer-body">
+        <div class="form-group">
+            <label class="form-label">API Token</label>
+            <input class="form-input" id="apify-token" type="password" placeholder="Cole uma vez para salvar localmente" />
+        </div>
+        <button class="save-btn" onclick="saveApifyToken()">SALVAR TOKEN</button>
+
+        <div class="form-group" style="margin-top:18px">
+            <label class="form-label">Actor ID</label>
+            <input class="form-input" id="apify-actor" placeholder="nwua9Gu5YrADL7ZDj" />
+        </div>
+        <div class="form-group">
+            <label class="form-label">CSV de Saída</label>
+            <input class="form-input" id="apify-csv" placeholder="apify_leads.csv" />
+        </div>
+        <div class="form-group">
+            <label class="form-label">Input JSON</label>
+            <textarea class="form-textarea" id="apify-input" rows="14"></textarea>
+        </div>
+        <button class="save-btn" onclick="startApifyRun()">INICIAR SCRAPER</button>
+
+        <div class="form-group" style="margin-top:18px">
+            <label class="form-label">Última execução</label>
+            <div class="hist-item">
+                <div>
+                    <div class="hist-name" id="apify-run-id">Nenhuma execução nesta sessão</div>
+                    <div class="hist-num" id="apify-run-status">Aguardando</div>
+                </div>
+                <button class="btn btn-start" id="apify-import-btn" onclick="importApifyRun()" style="display:none">IMPORTAR</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="drawer-backdrop" id="hist-backdrop" onclick="closeHistory()"></div>
 <div class="drawer" id="hist-drawer">
     <div class="drawer-head">
@@ -674,7 +716,8 @@ const S = {
     stats: { enviado: 0, invalido: 0, erro: 0 },
     selected: null,
     logs: {},      // phoneId → [{type,message,time}]
-    histCat: 'enviado'
+    histCat: 'enviado',
+    apify: { runId: null, polling: null }
 };
 
 // ─── SOCKET ───────────────────────────────────────────────────────────────
@@ -729,6 +772,10 @@ socket.on('log', ({ phoneId, type, message, time }) => {
 socket.on('stats:update', (stats) => {
     S.stats = stats;
     updateGlobalStats();
+});
+
+socket.on('apify:update', (run) => {
+    updateApifyRun(run);
 });
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────
@@ -957,6 +1004,7 @@ function loadSettingsForm() {
 }
 async function saveSettings() {
     const cfg = {
+        ...S.config,
         arquivoCSV:           document.getElementById('cfg-csv').value.trim(),
         limiteDiario:         parseInt(document.getElementById('cfg-limit').value),
         pausaEntreMensagens:  parseInt(document.getElementById('cfg-pause').value),
@@ -972,6 +1020,87 @@ async function saveSettings() {
 }
 
 // ─── HISTORY ──────────────────────────────────────────────────────────────
+function openApify() {
+    document.getElementById('apify-drawer').classList.add('open');
+    document.getElementById('apify-backdrop').classList.add('open');
+    loadApifyState();
+}
+function closeApify() {
+    document.getElementById('apify-drawer').classList.remove('open');
+    document.getElementById('apify-backdrop').classList.remove('open');
+}
+async function loadApifyState() {
+    const r = await fetch('/api/apify/state');
+    const d = await r.json();
+    document.getElementById('apify-actor').value = d.actorId || '';
+    document.getElementById('apify-csv').value = d.outputCSV || 'apify_leads.csv';
+    document.getElementById('apify-input').value = JSON.stringify(d.input || {}, null, 2);
+    document.getElementById('apify-token').placeholder = d.hasToken ? 'Token salvo localmente' : 'Cole uma vez para salvar localmente';
+    if (d.runs && d.runs[0]) updateApifyRun(d.runs[0]);
+}
+async function saveApifyToken() {
+    const token = document.getElementById('apify-token').value.trim();
+    if (!token) return toast('Cole o token da Apify', 'warn');
+    const r = await fetch('/api/apify/token', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ token })
+    });
+    const d = await r.json();
+    if (!r.ok) return toast(d.error || 'Erro ao salvar token', 'err');
+    document.getElementById('apify-token').value = '';
+    document.getElementById('apify-token').placeholder = 'Token salvo localmente';
+    toast('Token da Apify salvo', 'ok');
+}
+async function startApifyRun() {
+    let input;
+    try { input = JSON.parse(document.getElementById('apify-input').value); }
+    catch (_) { return toast('Input JSON inválido', 'err'); }
+
+    const r = await fetch('/api/apify/run', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+            actorId: document.getElementById('apify-actor').value.trim(),
+            outputCSV: document.getElementById('apify-csv').value.trim(),
+            input
+        })
+    });
+    const d = await r.json();
+    if (!r.ok) return toast(d.error || 'Erro ao iniciar Apify', 'err');
+    updateApifyRun(d);
+    toast('Scraper iniciado na Apify', 'ok');
+    pollApifyRun(d.id);
+}
+function updateApifyRun(run) {
+    if (!run || !run.id) return;
+    S.apify.runId = run.id;
+    document.getElementById('apify-run-id').textContent = run.id;
+    document.getElementById('apify-run-status').textContent =
+        `${run.status || 'UNKNOWN'}${run.imported ? ` - ${run.imported}/${run.total} importados` : ''}`;
+    document.getElementById('apify-import-btn').style.display = run.status === 'SUCCEEDED' ? '' : 'none';
+}
+function pollApifyRun(id) {
+    clearInterval(S.apify.polling);
+    S.apify.polling = setInterval(async () => {
+        const r = await fetch(`/api/apify/run/${id}`);
+        const d = await r.json();
+        if (!r.ok) { clearInterval(S.apify.polling); return toast(d.error || 'Erro ao consultar Apify', 'err'); }
+        updateApifyRun(d);
+        if (['SUCCEEDED','FAILED','ABORTED','TIMED-OUT'].includes(d.status)) clearInterval(S.apify.polling);
+    }, 10000);
+}
+async function importApifyRun() {
+    if (!S.apify.runId) return;
+    const r = await fetch(`/api/apify/run/${S.apify.runId}/import`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ outputCSV: document.getElementById('apify-csv').value.trim() })
+    });
+    const d = await r.json();
+    if (!r.ok) return toast(d.error || 'Erro ao importar leads', 'err');
+    S.config.arquivoCSV = d.fileName;
+    document.getElementById('cfg-csv').value = d.fileName;
+    toast(`${d.imported} leads importados para ${d.fileName}`, 'ok');
+}
+
 function openHistory() {
     document.getElementById('hist-drawer').classList.add('open');
     document.getElementById('hist-backdrop').classList.add('open');
@@ -1023,6 +1152,7 @@ function toast(msg, type = 'ok') {
 document.addEventListener('keydown', e => {
     if (e.key === 'Escape') {
         document.getElementById('add-modal').classList.add('hidden');
+        closeApify();
         closeSettings();
         closeHistory();
     }
