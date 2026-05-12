@@ -583,21 +583,28 @@ async function runApifyBatch(options) {
             const finishedRun = await waitForApifyRun(run.id);
             if (!finishedRun) break;
             if (finishedRun.status !== 'SUCCEEDED') {
-                throw new Error(`Run da Apify terminou como ${finishedRun.status}`);
+                apifyLog('warn', `Run de ${region} terminou como ${finishedRun.status}: ${finishedRun.statusMessage || 'sem detalhe'}`);
+            } else {
+                apifyLog('success', `Busca concluida em ${region}. Importando dataset...`);
             }
-            apifyLog('success', `Busca concluida em ${region}. Importando dataset...`);
 
-            const datasetId = finishedRun.defaultDatasetId;
-            const itemsResponse = await apifyRequest(
-                'GET',
-                `/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json`
-            );
-            const result = await appendLeadsCsv(outputCSV, Array.isArray(itemsResponse) ? itemsResponse : []);
+            if (finishedRun.defaultDatasetId) {
+                const datasetId = finishedRun.defaultDatasetId;
+                const itemsResponse = await apifyRequest(
+                    'GET',
+                    `/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json`
+                );
+                const result = await appendLeadsCsv(outputCSV, Array.isArray(itemsResponse) ? itemsResponse : []);
+                apifyBatch.processedRegions++;
+                apifyBatch.imported += result.imported;
+                apifyBatch.total += result.total;
+                saveConfig({ ...loadConfig(), arquivoCSV: result.fileName, apifyOutputCSV: result.fileName });
+                apifyLog(finishedRun.status === 'SUCCEEDED' ? 'success' : 'warn', `${result.imported} leads novos importados de ${region} para ${result.fileName}`);
+                emitApifyBatch();
+                continue;
+            }
+
             apifyBatch.processedRegions++;
-            apifyBatch.imported += result.imported;
-            apifyBatch.total += result.total;
-            saveConfig({ ...loadConfig(), arquivoCSV: result.fileName, apifyOutputCSV: result.fileName });
-            apifyLog('success', `${result.imported} leads novos importados de ${region} para ${result.fileName}`);
             emitApifyBatch();
         }
         apifyBatch.status = apifyBatch.stopped ? 'STOPPED' : 'FINISHED';
