@@ -1,0 +1,16 @@
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+.env
+.env.*
+
+.wwebjs_auth/
+.wwebjs_cache/
+qrcode.png
+
+phones.json
+registro_contatos.json
+
+*.log
