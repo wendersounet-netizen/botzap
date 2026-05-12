@@ -1123,8 +1123,8 @@ function updateApifyRun(run) {
     document.getElementById('apify-run-id').textContent = run.id;
     document.getElementById('apify-run-status').textContent =
         `${run.status || 'UNKNOWN'}${run.imported ? ` - ${run.imported}/${run.total} importados` : ''}`;
-    document.getElementById('apify-import-btn').style.display = run.status === 'SUCCEEDED' ? '' : 'none';
-    if (run.status === 'SUCCEEDED' && !S.apify.importedRuns.has(run.id)) {
+    document.getElementById('apify-import-btn').style.display = run.status === 'SUCCEEDED' && !run.region ? '' : 'none';
+    if (run.status === 'SUCCEEDED' && !run.region && !S.apify.importedRuns.has(run.id)) {
         S.apify.importedRuns.add(run.id);
         importApifyRun(true);
     }
