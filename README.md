@@ -224,6 +224,10 @@ Observacao: a biblioteca permite aplicar etiquetas existentes, mas nao fornece c
 
 ## Configuracoes Principais
 
+As configuracoes de Apify continuam globais, porque a Apify gera a base compartilhada.
+
+As configuracoes de campanha agora podem ser separadas por telefone em `phoneConfigs`.
+
 Exemplo de campos em `config.json`:
 
 ```json
@@ -236,9 +240,20 @@ Exemplo de campos em `config.json`:
   "apifyActorId": "nwua9Gu5YrADL7ZDj",
   "apifyOutputCSV": "SST.csv",
   "apifyAutoMaxRuns": 25,
-  "etiquetaArquivarBusiness": true
+  "etiquetaArquivarBusiness": true,
+  "phoneConfigs": {
+    "phone_1778587565422": {
+      "arquivoCSV": "SST.csv",
+      "limiteDiario": 40,
+      "pausaEntreMensagens": 90,
+      "pausaInicial": 45,
+      "mensagem": "Mensagem especifica deste telefone"
+    }
+  }
 }
 ```
+
+Quando uma busca da Apify importa um CSV novo, o sistema atualiza o CSV ativo global e tambem o `arquivoCSV` das configuracoes de todos os telefones.
 
 ## Linha do Tempo
 
@@ -306,6 +321,16 @@ Exemplo de campos em `config.json`:
 - Implementado arquivamento da conversa apos envio.
 - Regra protegida para rodar apenas em WhatsApp Business.
 - Quando etiqueta compativel nao existe, o sistema arquiva e registra aviso no log.
+
+### 2026-05-12 - Configuracao por telefone
+
+- Configuracoes de campanha deixaram de ser somente globais.
+- Cada telefone pode ter propria mensagem, limite diario, pausa entre mensagens, pausa inicial e CSV ativo.
+- O dashboard passou a salvar configuracao em `POST /api/phones/:id/config`.
+- O snapshot de cada telefone passou a incluir sua propria `config`.
+- O disparo usa `campaignConfigForPhone(phoneId)`.
+- Configuracoes globais continuam como fallback para telefones sem configuracao propria.
+- Apify continua global e, ao importar novo CSV, atualiza o CSV ativo de todos os telefones.
 
 ## Politica de Documentacao Continua
 
