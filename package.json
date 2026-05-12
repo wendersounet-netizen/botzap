@@ -1,0 +1,19 @@
+{
+  "name": "botzap",
+  "version": "1.0.0",
+  "description": "Dashboard para gerenciamento de campanhas WhatsApp com whatsapp-web.js.",
+  "main": "Server.js",
+  "scripts": {
+    "start": "node Server.js",
+    "start:cli": "node app.js",
+    "check": "node --check Server.js && node --check app.js"
+  },
+  "dependencies": {
+    "csv-parser": "^3.2.1",
+    "express": "^5.2.1",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "socket.io": "^4.8.3",
+    "whatsapp-web.js": "^1.34.7"
+  }
+}
