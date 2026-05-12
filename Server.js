@@ -128,9 +128,38 @@ const DEFAULT_CONFIG = {
 // ─── HELPERS DE PERSISTÊNCIA ─────────────────────────────────────────────────
 function loadConfig() {
     if (!fs.existsSync(CONFIG_FILE)) fs.writeFileSync(CONFIG_FILE, JSON.stringify(DEFAULT_CONFIG, null, 2));
-    return { ...DEFAULT_CONFIG, ...JSON.parse(fs.readFileSync(CONFIG_FILE)) };
+    const raw = JSON.parse(fs.readFileSync(CONFIG_FILE));
+    const config = { ...DEFAULT_CONFIG, ...raw };
+    if (!config.phoneConfigs || typeof config.phoneConfigs !== 'object' || Array.isArray(config.phoneConfigs)) {
+        config.phoneConfigs = {};
+    }
+    return config;
 }
 function saveConfig(c) { fs.writeFileSync(CONFIG_FILE, JSON.stringify(c, null, 2)); }
+
+function campaignConfigForPhone(phoneId) {
+    const config = loadConfig();
+    return {
+        ...config,
+        ...(config.phoneConfigs?.[phoneId] || {})
+    };
+}
+
+function saveCampaignConfigForPhone(phoneId, patch) {
+    const config = loadConfig();
+    config.phoneConfigs = config.phoneConfigs || {};
+    config.phoneConfigs[phoneId] = {
+        ...(config.phoneConfigs[phoneId] || {}),
+        arquivoCSV: patch.arquivoCSV,
+        limiteDiario: patch.limiteDiario,
+        pausaEntreMensagens: patch.pausaEntreMensagens,
+        pausaInicial: patch.pausaInicial,
+        mensagem: patch.mensagem,
+        etiquetaArquivarBusiness: patch.etiquetaArquivarBusiness
+    };
+    saveConfig(config);
+    return campaignConfigForPhone(phoneId);
+}
 
 function loadPhones() {
     if (!fs.existsSync(PHONES_FILE)) fs.writeFileSync(PHONES_FILE, JSON.stringify([], null, 2));
@@ -225,7 +254,7 @@ function leadSegment(lead) {
 }
 
 async function labelAndArchiveChat(cd, idZap, lead, phoneId) {
-    const config = loadConfig();
+    const config = campaignConfigForPhone(phoneId);
     if (!config.etiquetaArquivarBusiness) return;
     if (!isBusinessSession(cd.client)) {
         log(phoneId, 'info', `Conta nao Business: etiqueta/arquivo ignorado para ${lead.nome}`);
@@ -598,7 +627,13 @@ async function runApifyBatch(options) {
                 apifyBatch.processedRegions++;
                 apifyBatch.imported += result.imported;
                 apifyBatch.total += result.total;
-                saveConfig({ ...loadConfig(), arquivoCSV: result.fileName, apifyOutputCSV: result.fileName });
+                const nextConfig = loadConfig();
+                nextConfig.arquivoCSV = result.fileName;
+                nextConfig.apifyOutputCSV = result.fileName;
+                Object.keys(nextConfig.phoneConfigs || {}).forEach(id => {
+                    nextConfig.phoneConfigs[id].arquivoCSV = result.fileName;
+                });
+                saveConfig(nextConfig);
                 apifyLog(finishedRun.status === 'SUCCEEDED' ? 'success' : 'warn', `${result.imported} leads novos importados de ${region} para ${result.fileName}`);
                 emitApifyBatch();
                 continue;
@@ -695,7 +730,7 @@ async function initializePhone(phoneData) {
 
 // ─── CAMPANHA ────────────────────────────────────────────────────────────────
 async function runCampaign(phoneId) {
-    const config = loadConfig();
+    const config = campaignConfigForPhone(phoneId);
     const cd = clients[phoneId];
     const LIMITE = Number(config.limiteDiario) || 40;
     let disparos = sentTodayByPhone(loadDB(), phoneId);
@@ -832,6 +867,7 @@ function phoneSnapshot(phoneData) {
     const cd = clients[phoneData.id];
     return {
         ...phoneData,
+        config: campaignConfigForPhone(phoneData.id),
         status:   cd?.status   || 'offline',
         campaign: cd?.campaign || null,
         paused:   cd?.paused   || false,
@@ -919,6 +955,14 @@ app.post('/api/phones/:id/stop', (req, res) => {
 // Config
 app.get('/api/config',  (req, res) => res.json(loadConfig()));
 app.post('/api/config', (req, res) => { saveConfig(req.body); res.json({ ok: true }); });
+app.get('/api/phones/:id/config', (req, res) => {
+    res.json(campaignConfigForPhone(req.params.id));
+});
+app.post('/api/phones/:id/config', (req, res) => {
+    const config = saveCampaignConfigForPhone(req.params.id, req.body || {});
+    emit('phone:update', { id: req.params.id, config });
+    res.json(config);
+});
 
 // Apify
 app.get('/api/apify/state', (req, res) => {
@@ -1015,7 +1059,11 @@ app.post('/api/apify/run/:id/import', async (req, res) => {
         const config = loadConfig();
         const outputCSV = req.body?.outputCSV || apifyRuns[id]?.outputCSV || config.apifyOutputCSV || 'apify_leads.csv';
         const result = await appendLeadsCsv(outputCSV, Array.isArray(itemsResponse) ? itemsResponse : []);
-        saveConfig({ ...config, arquivoCSV: result.fileName, apifyOutputCSV: result.fileName });
+        const nextConfig = { ...config, arquivoCSV: result.fileName, apifyOutputCSV: result.fileName };
+        Object.keys(nextConfig.phoneConfigs || {}).forEach(phoneId => {
+            nextConfig.phoneConfigs[phoneId].arquivoCSV = result.fileName;
+        });
+        saveConfig(nextConfig);
         apifyLog('success', `${result.imported} leads importados automaticamente para ${result.fileName}`);
 
         apifyRuns[id] = {
