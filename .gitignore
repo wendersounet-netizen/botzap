@@ -5,6 +5,7 @@ yarn-error.log*
 
 .env
 .env.*
+.apify_token
 
 .wwebjs_auth/
 .wwebjs_cache/
