@@ -71,6 +71,45 @@ const DEFAULT_APIFY_INPUT = {
     allPlacesNoSearchAction: ''
 };
 
+const DEFAULT_APIFY_SEGMENT_TERMS = [
+    'Segurança do Trabalho',
+    'SST',
+    'Medicina do Trabalho',
+    'Medicina Ocupacional',
+    'Treinamento NR',
+    'Consultoria NR',
+    'Engenharia de Segurança do Trabalho',
+    'PGR PCMSO LTCAT'
+];
+
+const DEFAULT_APIFY_REGIONS = [
+    'São Paulo SP',
+    'Guarulhos SP',
+    'Osasco SP',
+    'Santo André SP',
+    'São Bernardo do Campo SP',
+    'Campinas SP',
+    'Jundiaí SP',
+    'Sorocaba SP',
+    'Ribeirão Preto SP',
+    'São José dos Campos SP',
+    'Curitiba PR',
+    'Londrina PR',
+    'Maringá PR',
+    'Cascavel PR',
+    'Joinville SC',
+    'Florianópolis SC',
+    'Blumenau SC',
+    'Itajaí SC',
+    'Chapecó SC',
+    'Porto Alegre RS',
+    'Caxias do Sul RS',
+    'Belo Horizonte MG',
+    'Contagem MG',
+    'Rio de Janeiro RJ',
+    'Niterói RJ'
+];
+
 const DEFAULT_CONFIG = {
     mensagem: `Olá, tudo bem? Me chamo Wender e trabalho com o posicionamento digital de profissionais liberais.\n\nEstava analisando o perfil da {nome} em {cidade} e notei que vocês ainda não possuem um site institucional ou Landing Page de autoridade. No setor jurídico, a falta de uma vitrine oficial acaba passando menos segurança para novos clientes que buscam especialistas no Google.\n\nEu desenvolvo sites de alto padrão que ajudam a transmitir mais credibilidade e facilitam o fechamento de contratos de maior valor. Teria 2 minutos para eu te mostrar como isso pode impactar a sua advocacia?`,
     limiteDiario: 40,
@@ -79,7 +118,10 @@ const DEFAULT_CONFIG = {
     arquivoCSV: 'advocacia1.csv',
     apifyActorId: APIFY_DEFAULT_ACTOR_ID,
     apifyOutputCSV: 'apify_leads.csv',
-    apifyInput: DEFAULT_APIFY_INPUT
+    apifyInput: DEFAULT_APIFY_INPUT,
+    apifySegmentTerms: DEFAULT_APIFY_SEGMENT_TERMS,
+    apifyRegions: DEFAULT_APIFY_REGIONS,
+    apifyAutoMaxRuns: 20
 };
 
 // ─── HELPERS DE PERSISTÊNCIA ─────────────────────────────────────────────────
@@ -243,6 +285,23 @@ function firstValue(...values) {
     return '';
 }
 
+function normalizeList(value, fallback = []) {
+    const items = Array.isArray(value) ? value.map(item => String(item).trim()).filter(Boolean) : String(value || '')
+        .split(/\r?\n|,/)
+        .map(item => item.trim())
+        .filter(Boolean);
+    return items.length ? items : fallback;
+}
+
+function buildRegionalApifyInput(baseInput, segmentTerms, region) {
+    const terms = normalizeList(segmentTerms, DEFAULT_APIFY_SEGMENT_TERMS);
+    return {
+        ...DEFAULT_APIFY_INPUT,
+        ...(baseInput || {}),
+        searchStringsArray: terms.map(term => `${term} ${region}`)
+    };
+}
+
 function categoryAt(item, index) {
     if (Array.isArray(item.categories)) return item.categories[index] || '';
     return item[`categories/${index}`] || '';
@@ -286,10 +345,67 @@ function writeLeadsCsv(fileName, items) {
     return { fileName: path.basename(filePath), total: items.length, imported: rows.length };
 }
 
+function readCsvNumbers(filePath) {
+    return new Promise((resolve) => {
+        const numbers = new Set();
+        if (!fs.existsSync(filePath)) return resolve(numbers);
+        fs.createReadStream(filePath)
+            .pipe(csv())
+            .on('data', row => {
+                const key = Object.keys(row).find(k => k.trim().toLowerCase().includes('phone'));
+                const numero = normalizePhoneNumber(key ? row[key] : '');
+                if (numero) numbers.add(numero);
+            })
+            .on('end', () => resolve(numbers))
+            .on('error', () => resolve(numbers));
+    });
+}
+
+async function appendLeadsCsv(fileName, items) {
+    const headers = [
+        'title', 'totalScore', 'reviewsCount', 'street', 'city', 'state', 'countryCode',
+        'website', 'phone', 'categories/0', 'categories/1', 'categories/2', 'url',
+        'categoryName', 'emails/0', 'facebooks/0', 'instagrams/0'
+    ];
+    const filePath = safeCsvPath(fileName);
+    const existing = await readCsvNumbers(filePath);
+    const rows = [];
+    for (const item of items.map(normalizeApifyLead)) {
+        const numero = normalizePhoneNumber(item.phone);
+        if (!item.title || !numero || existing.has(numero)) continue;
+        existing.add(numero);
+        rows.push(item);
+    }
+    const lines = rows.map(row => headers.map(header => csvEscape(row[header])).join(','));
+    if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, headers.map(csvEscape).join(',') + '\n', 'utf8');
+    }
+    if (lines.length) {
+        fs.appendFileSync(filePath, lines.join('\n') + '\n', 'utf8');
+    }
+    return { fileName: path.basename(filePath), total: items.length, imported: rows.length };
+}
+
 // ─── ESTADO EM MEMÓRIA ───────────────────────────────────────────────────────
 // clients[id] = { client, status, campaign: null | { sent, startTime }, paused, stopped }
 const clients = {};
 const apifyRuns = {};
+const apifyBatch = {
+    running: false,
+    stopped: false,
+    id: null,
+    status: 'idle',
+    currentRegion: null,
+    currentRunId: null,
+    startedAt: null,
+    finishedAt: null,
+    processedRegions: 0,
+    imported: 0,
+    total: 0,
+    error: null,
+    outputCSV: null,
+    regions: []
+};
 
 // ─── HELPERS DE COMUNICAÇÃO ──────────────────────────────────────────────────
 function emit(event, data) { io.emit(event, data); }
@@ -298,6 +414,132 @@ function log(phoneId, type, message) {
     const entry = { phoneId, type, message, time: new Date().toISOString() };
     emit('log', entry);
     console.log(`[${phoneId}][${type}] ${message}`);
+}
+
+function emitApifyBatch() {
+    emit('apify:batch', { ...apifyBatch });
+}
+
+function apifyDelay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isApifyTerminal(status) {
+    return ['SUCCEEDED', 'FAILED', 'ABORTED', 'TIMED-OUT'].includes(status);
+}
+
+async function waitForApifyRun(runId) {
+    while (!apifyBatch.stopped) {
+        const response = await apifyRequest('GET', `/v2/actor-runs/${encodeURIComponent(runId)}`);
+        const run = response.data || response;
+        apifyRuns[runId] = {
+            ...(apifyRuns[runId] || {}),
+            id: run.id,
+            status: run.status,
+            statusMessage: run.statusMessage,
+            defaultDatasetId: run.defaultDatasetId,
+            startedAt: run.startedAt,
+            finishedAt: run.finishedAt,
+            stats: run.stats || null
+        };
+        apifyBatch.status = run.status;
+        emit('apify:update', apifyRuns[runId]);
+        emitApifyBatch();
+        if (isApifyTerminal(run.status)) return run;
+        await apifyDelay(15000);
+    }
+    return null;
+}
+
+async function runApifyBatch(options) {
+    const config = loadConfig();
+    const actorId = options.actorId || config.apifyActorId || APIFY_DEFAULT_ACTOR_ID;
+    const outputCSV = options.outputCSV || config.apifyOutputCSV || 'apify_leads.csv';
+    const segmentTerms = normalizeList(options.segmentTerms, config.apifySegmentTerms || DEFAULT_APIFY_SEGMENT_TERMS);
+    const regions = normalizeList(options.regions, config.apifyRegions || DEFAULT_APIFY_REGIONS);
+    const maxRuns = Math.max(1, Math.min(Number(options.maxRuns || config.apifyAutoMaxRuns || 20), regions.length));
+    const baseInput = options.input || config.apifyInput || DEFAULT_APIFY_INPUT;
+
+    Object.assign(apifyBatch, {
+        running: true,
+        stopped: false,
+        id: `batch_${Date.now()}`,
+        status: 'RUNNING',
+        currentRegion: null,
+        currentRunId: null,
+        startedAt: new Date().toISOString(),
+        finishedAt: null,
+        processedRegions: 0,
+        imported: 0,
+        total: 0,
+        error: null,
+        outputCSV,
+        regions: regions.slice(0, maxRuns)
+    });
+    emitApifyBatch();
+
+    saveConfig({
+        ...config,
+        arquivoCSV: outputCSV,
+        apifyActorId: actorId,
+        apifyOutputCSV: outputCSV,
+        apifyInput: baseInput,
+        apifySegmentTerms: segmentTerms,
+        apifyRegions: regions,
+        apifyAutoMaxRuns: maxRuns
+    });
+
+    try {
+        for (const region of regions.slice(0, maxRuns)) {
+            if (apifyBatch.stopped) break;
+            apifyBatch.currentRegion = region;
+            apifyBatch.status = 'STARTING';
+            emitApifyBatch();
+
+            const regionalInput = buildRegionalApifyInput(baseInput, segmentTerms, region);
+            const response = await apifyRequest('POST', `/v2/acts/${apifyActorPath(actorId)}/runs`, regionalInput);
+            const run = response.data || response;
+            apifyBatch.currentRunId = run.id;
+            apifyBatch.status = run.status;
+            apifyRuns[run.id] = {
+                id: run.id,
+                actorId,
+                outputCSV,
+                region,
+                status: run.status,
+                defaultDatasetId: run.defaultDatasetId,
+                startedAt: run.startedAt || new Date().toISOString()
+            };
+            emit('apify:update', apifyRuns[run.id]);
+            emitApifyBatch();
+
+            const finishedRun = await waitForApifyRun(run.id);
+            if (!finishedRun) break;
+            if (finishedRun.status !== 'SUCCEEDED') {
+                throw new Error(`Run da Apify terminou como ${finishedRun.status}`);
+            }
+
+            const datasetId = finishedRun.defaultDatasetId;
+            const itemsResponse = await apifyRequest(
+                'GET',
+                `/v2/datasets/${encodeURIComponent(datasetId)}/items?clean=true&format=json`
+            );
+            const result = await appendLeadsCsv(outputCSV, Array.isArray(itemsResponse) ? itemsResponse : []);
+            apifyBatch.processedRegions++;
+            apifyBatch.imported += result.imported;
+            apifyBatch.total += result.total;
+            saveConfig({ ...loadConfig(), arquivoCSV: result.fileName, apifyOutputCSV: result.fileName });
+            emitApifyBatch();
+        }
+        apifyBatch.status = apifyBatch.stopped ? 'STOPPED' : 'FINISHED';
+    } catch (err) {
+        apifyBatch.status = 'ERROR';
+        apifyBatch.error = err.message;
+    } finally {
+        apifyBatch.running = false;
+        apifyBatch.finishedAt = new Date().toISOString();
+        emitApifyBatch();
+    }
 }
 
 // ─── DELAY INTERROMPÍVEL ─────────────────────────────────────────────────────
@@ -606,6 +848,10 @@ app.get('/api/apify/state', (req, res) => {
         actorId: config.apifyActorId || APIFY_DEFAULT_ACTOR_ID,
         outputCSV: config.apifyOutputCSV || 'apify_leads.csv',
         input: config.apifyInput || DEFAULT_APIFY_INPUT,
+        segmentTerms: config.apifySegmentTerms || DEFAULT_APIFY_SEGMENT_TERMS,
+        regions: config.apifyRegions || DEFAULT_APIFY_REGIONS,
+        autoMaxRuns: config.apifyAutoMaxRuns || 20,
+        batch: { ...apifyBatch },
         runs: Object.values(apifyRuns).sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))
     });
 });
@@ -702,6 +948,27 @@ app.post('/api/apify/run/:id/import', async (req, res) => {
     } catch (err) {
         res.status(400).json({ error: err.message });
     }
+});
+
+app.post('/api/apify/batch/start', (req, res) => {
+    if (apifyBatch.running) {
+        return res.status(400).json({ error: 'Lote da Apify ja esta em execucao' });
+    }
+    runApifyBatch(req.body || {}).catch(err => {
+        apifyBatch.running = false;
+        apifyBatch.status = 'ERROR';
+        apifyBatch.error = err.message;
+        apifyBatch.finishedAt = new Date().toISOString();
+        emitApifyBatch();
+    });
+    res.json({ ok: true, batch: { ...apifyBatch } });
+});
+
+app.post('/api/apify/batch/stop', (req, res) => {
+    apifyBatch.stopped = true;
+    apifyBatch.status = apifyBatch.running ? 'STOPPING' : apifyBatch.status;
+    emitApifyBatch();
+    res.json({ ok: true, batch: { ...apifyBatch } });
 });
 
 // Stats + histórico
