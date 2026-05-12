@@ -121,7 +121,8 @@ const DEFAULT_CONFIG = {
     apifyInput: DEFAULT_APIFY_INPUT,
     apifySegmentTerms: DEFAULT_APIFY_SEGMENT_TERMS,
     apifyRegions: DEFAULT_APIFY_REGIONS,
-    apifyAutoMaxRuns: 20
+    apifyAutoMaxRuns: 20,
+    etiquetaArquivarBusiness: true
 };
 
 // ─── HELPERS DE PERSISTÊNCIA ─────────────────────────────────────────────────
@@ -213,6 +214,50 @@ function releaseReservationsByPhone(phoneId) {
     const before = db.reservado.length;
     db.reservado = db.reservado.filter(item => !(item.phoneId === phoneId && item.status === 'active'));
     if (db.reservado.length !== before) saveDB(db);
+}
+
+function isBusinessSession(client) {
+    return ['smba', 'smbi'].includes(String(client?.info?.platform || '').toLowerCase());
+}
+
+function leadSegment(lead) {
+    return firstValue(lead.segmento, lead.segment, lead.categoryName, lead.categoria, 'Lead');
+}
+
+async function labelAndArchiveChat(cd, idZap, lead, phoneId) {
+    const config = loadConfig();
+    if (!config.etiquetaArquivarBusiness) return;
+    if (!isBusinessSession(cd.client)) {
+        log(phoneId, 'info', `Conta nao Business: etiqueta/arquivo ignorado para ${lead.nome}`);
+        return;
+    }
+
+    try {
+        const chat = await cd.client.getChatById(idZap);
+        const segment = leadSegment(lead);
+        const target = normalizeLabelName(segment);
+        let labels = [];
+        try { labels = await cd.client.getLabels(); } catch (_) {}
+        const label = labels.find(item => {
+            const name = normalizeLabelName(item.name);
+            return name === target || name.includes(target) || target.includes(name);
+        });
+
+        if (label) {
+            const currentLabels = await chat.getLabels();
+            const labelIds = new Set(currentLabels.map(item => item.id));
+            labelIds.add(label.id);
+            await chat.changeLabels([...labelIds]);
+            log(phoneId, 'info', `Etiqueta "${label.name}" aplicada em ${lead.nome}`);
+        } else {
+            log(phoneId, 'warn', `Nenhuma etiqueta encontrada para segmento "${segment}"`);
+        }
+
+        await chat.archive();
+        log(phoneId, 'info', `Conversa arquivada: ${lead.nome}`);
+    } catch (err) {
+        log(phoneId, 'warn', `Nao foi possivel etiquetar/arquivar ${lead.nome}: ${err.message || err}`);
+    }
 }
 
 function loadApifyToken() {
@@ -307,6 +352,14 @@ function categoryAt(item, index) {
     return item[`categories/${index}`] || '';
 }
 
+function normalizeLabelName(value) {
+    return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+        .toLowerCase();
+}
+
 function normalizeApifyLead(item) {
     return {
         title: firstValue(item.title, item.name, item.placeName),
@@ -323,6 +376,7 @@ function normalizeApifyLead(item) {
         'categories/2': categoryAt(item, 2),
         url: firstValue(item.url, item.placeUrl),
         categoryName: firstValue(item.categoryName, item.category),
+        segment: firstValue(item.segment, item.segmento, item.categoryName, item.category, categoryAt(item, 0)),
         'emails/0': firstValue(item.emails, item.email),
         'facebooks/0': firstValue(item.facebooks, item.facebook),
         'instagrams/0': firstValue(item.instagrams, item.instagram)
@@ -333,7 +387,7 @@ function writeLeadsCsv(fileName, items) {
     const headers = [
         'title', 'totalScore', 'reviewsCount', 'street', 'city', 'state', 'countryCode',
         'website', 'phone', 'categories/0', 'categories/1', 'categories/2', 'url',
-        'categoryName', 'emails/0', 'facebooks/0', 'instagrams/0'
+        'categoryName', 'segment', 'emails/0', 'facebooks/0', 'instagrams/0'
     ];
     const rows = items.map(normalizeApifyLead).filter(item => item.title && item.phone);
     const content = [
@@ -365,7 +419,7 @@ async function appendLeadsCsv(fileName, items) {
     const headers = [
         'title', 'totalScore', 'reviewsCount', 'street', 'city', 'state', 'countryCode',
         'website', 'phone', 'categories/0', 'categories/1', 'categories/2', 'url',
-        'categoryName', 'emails/0', 'facebooks/0', 'instagrams/0'
+        'categoryName', 'segment', 'emails/0', 'facebooks/0', 'instagrams/0'
     ];
     const filePath = safeCsvPath(fileName);
     const existing = await readCsvNumbers(filePath);
@@ -404,7 +458,8 @@ const apifyBatch = {
     total: 0,
     error: null,
     outputCSV: null,
-    regions: []
+    regions: [],
+    logs: []
 };
 
 // ─── HELPERS DE COMUNICAÇÃO ──────────────────────────────────────────────────
@@ -418,6 +473,14 @@ function log(phoneId, type, message) {
 
 function emitApifyBatch() {
     emit('apify:batch', { ...apifyBatch });
+}
+
+function apifyLog(type, message) {
+    const entry = { type, message, time: new Date().toISOString() };
+    apifyBatch.logs.unshift(entry);
+    if (apifyBatch.logs.length > 300) apifyBatch.logs.length = 300;
+    emit('apify:log', entry);
+    console.log(`[apify][${type}] ${message}`);
 }
 
 function apifyDelay(ms) {
@@ -474,8 +537,10 @@ async function runApifyBatch(options) {
         total: 0,
         error: null,
         outputCSV,
-        regions: regions.slice(0, maxRuns)
+        regions: regions.slice(0, maxRuns),
+        logs: []
     });
+    apifyLog('info', `Lote iniciado: ${maxRuns} regioes, CSV ${outputCSV}`);
     emitApifyBatch();
 
     saveConfig({
@@ -494,11 +559,13 @@ async function runApifyBatch(options) {
             if (apifyBatch.stopped) break;
             apifyBatch.currentRegion = region;
             apifyBatch.status = 'STARTING';
+            apifyLog('info', `Iniciando busca em ${region}`);
             emitApifyBatch();
 
             const regionalInput = buildRegionalApifyInput(baseInput, segmentTerms, region);
             const response = await apifyRequest('POST', `/v2/acts/${apifyActorPath(actorId)}/runs`, regionalInput);
             const run = response.data || response;
+            apifyLog('info', `Run ${run.id} criada para ${region}`);
             apifyBatch.currentRunId = run.id;
             apifyBatch.status = run.status;
             apifyRuns[run.id] = {
@@ -518,6 +585,7 @@ async function runApifyBatch(options) {
             if (finishedRun.status !== 'SUCCEEDED') {
                 throw new Error(`Run da Apify terminou como ${finishedRun.status}`);
             }
+            apifyLog('success', `Busca concluida em ${region}. Importando dataset...`);
 
             const datasetId = finishedRun.defaultDatasetId;
             const itemsResponse = await apifyRequest(
@@ -529,12 +597,15 @@ async function runApifyBatch(options) {
             apifyBatch.imported += result.imported;
             apifyBatch.total += result.total;
             saveConfig({ ...loadConfig(), arquivoCSV: result.fileName, apifyOutputCSV: result.fileName });
+            apifyLog('success', `${result.imported} leads novos importados de ${region} para ${result.fileName}`);
             emitApifyBatch();
         }
         apifyBatch.status = apifyBatch.stopped ? 'STOPPED' : 'FINISHED';
+        apifyLog(apifyBatch.stopped ? 'warn' : 'success', apifyBatch.stopped ? 'Lote parado pelo usuario' : 'Lote finalizado');
     } catch (err) {
         apifyBatch.status = 'ERROR';
         apifyBatch.error = err.message;
+        apifyLog('error', err.message);
     } finally {
         apifyBatch.running = false;
         apifyBatch.finishedAt = new Date().toISOString();
@@ -682,6 +753,7 @@ async function runCampaign(phoneId) {
                     .replace(/\{cidade\}/g, lead.cidade || 'sua região');
 
                 await cd.client.sendMessage(idZap, msg);
+                await labelAndArchiveChat(cd, idZap, lead, phoneId);
                 finalizeLead('enviado', numero, lead, phoneId);
                 disparos = sentTodayByPhone(loadDB(), phoneId);
                 cd.campaign.sent = disparos;
@@ -739,7 +811,8 @@ function loadCSV(arquivo) {
                     contatos.push({
                         nome: nome.split(/[-/|]/)[0].trim(),
                         telefone: String(telefone).replace(/\D/g, ''),
-                        cidade
+                        cidade,
+                        segmento: col('segment') || col('categoryName') || col('categories/0') || ''
                     });
                 }
             })
@@ -852,6 +925,7 @@ app.get('/api/apify/state', (req, res) => {
         regions: config.apifyRegions || DEFAULT_APIFY_REGIONS,
         autoMaxRuns: config.apifyAutoMaxRuns || 20,
         batch: { ...apifyBatch },
+        logs: apifyBatch.logs || [],
         runs: Object.values(apifyRuns).sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt))
     });
 });
@@ -872,8 +946,10 @@ app.post('/api/apify/run', async (req, res) => {
     const outputCSV = req.body?.outputCSV || config.apifyOutputCSV || 'apify_leads.csv';
 
     try {
+        apifyLog('info', `Iniciando busca unica no actor ${actorId}`);
         const response = await apifyRequest('POST', `/v2/acts/${apifyActorPath(actorId)}/runs`, runInput);
         const run = response.data || response;
+        apifyLog('info', `Run ${run.id} criada`);
         apifyRuns[run.id] = {
             id: run.id,
             actorId,
@@ -907,6 +983,7 @@ app.get('/api/apify/run/:id', async (req, res) => {
             stats: run.stats || null
         };
         apifyRuns[id] = snapshot;
+        apifyLog('info', `Run ${id}: ${snapshot.status}`);
         emit('apify:update', snapshot);
         res.json(snapshot);
     } catch (err) {
@@ -930,8 +1007,9 @@ app.post('/api/apify/run/:id/import', async (req, res) => {
         );
         const config = loadConfig();
         const outputCSV = req.body?.outputCSV || apifyRuns[id]?.outputCSV || config.apifyOutputCSV || 'apify_leads.csv';
-        const result = writeLeadsCsv(outputCSV, Array.isArray(itemsResponse) ? itemsResponse : []);
+        const result = await appendLeadsCsv(outputCSV, Array.isArray(itemsResponse) ? itemsResponse : []);
         saveConfig({ ...config, arquivoCSV: result.fileName, apifyOutputCSV: result.fileName });
+        apifyLog('success', `${result.imported} leads importados automaticamente para ${result.fileName}`);
 
         apifyRuns[id] = {
             ...(apifyRuns[id] || {}),
