@@ -672,6 +672,21 @@ body {
         <button class="save-btn" onclick="startApifyRun()">INICIAR SCRAPER</button>
 
         <div class="form-group" style="margin-top:18px">
+            <label class="form-label">Termos do Segmento</label>
+            <textarea class="form-textarea" id="apify-terms" rows="5"></textarea>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Regiões do Lote</label>
+            <textarea class="form-textarea" id="apify-regions" rows="8"></textarea>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Máximo de Regiões nesta Rodada</label>
+            <input class="form-input" id="apify-max-runs" type="number" min="1" max="200" />
+        </div>
+        <button class="save-btn" onclick="startApifyBatch()">RODAR LOTE POR REGIÕES</button>
+        <button class="btn btn-stop" onclick="stopApifyBatch()" style="width:100%;height:34px;margin-top:8px">PARAR LOTE</button>
+
+        <div class="form-group" style="margin-top:18px">
             <label class="form-label">Última execução</label>
             <div class="hist-item">
                 <div>
@@ -679,6 +694,15 @@ body {
                     <div class="hist-num" id="apify-run-status">Aguardando</div>
                 </div>
                 <button class="btn btn-start" id="apify-import-btn" onclick="importApifyRun()" style="display:none">IMPORTAR</button>
+            </div>
+        </div>
+        <div class="form-group">
+            <label class="form-label">Lote automático</label>
+            <div class="hist-item">
+                <div>
+                    <div class="hist-name" id="apify-batch-status">Inativo</div>
+                    <div class="hist-num" id="apify-batch-detail">Nenhuma rodada em execução</div>
+                </div>
             </div>
         </div>
     </div>
@@ -776,6 +800,10 @@ socket.on('stats:update', (stats) => {
 
 socket.on('apify:update', (run) => {
     updateApifyRun(run);
+});
+
+socket.on('apify:batch', (batch) => {
+    updateApifyBatch(batch);
 });
 
 // ─── HELPERS ─────────────────────────────────────────────────────────────
@@ -1035,8 +1063,12 @@ async function loadApifyState() {
     document.getElementById('apify-actor').value = d.actorId || '';
     document.getElementById('apify-csv').value = d.outputCSV || 'apify_leads.csv';
     document.getElementById('apify-input').value = JSON.stringify(d.input || {}, null, 2);
+    document.getElementById('apify-terms').value = (d.segmentTerms || []).join('\n');
+    document.getElementById('apify-regions').value = (d.regions || []).join('\n');
+    document.getElementById('apify-max-runs').value = d.autoMaxRuns || 20;
     document.getElementById('apify-token').placeholder = d.hasToken ? 'Token salvo localmente' : 'Cole uma vez para salvar localmente';
     if (d.runs && d.runs[0]) updateApifyRun(d.runs[0]);
+    if (d.batch) updateApifyBatch(d.batch);
 }
 async function saveApifyToken() {
     const token = document.getElementById('apify-token').value.trim();
@@ -1099,6 +1131,56 @@ async function importApifyRun() {
     S.config.arquivoCSV = d.fileName;
     document.getElementById('cfg-csv').value = d.fileName;
     toast(`${d.imported} leads importados para ${d.fileName}`, 'ok');
+}
+function listFromTextarea(id) {
+    return document.getElementById(id).value
+        .split(/\r?\n|,/)
+        .map(item => item.trim())
+        .filter(Boolean);
+}
+async function startApifyBatch() {
+    let input;
+    try { input = JSON.parse(document.getElementById('apify-input').value); }
+    catch (_) { return toast('Input JSON inválido', 'err'); }
+
+    const regions = listFromTextarea('apify-regions');
+    const segmentTerms = listFromTextarea('apify-terms');
+    if (!regions.length) return toast('Informe ao menos uma região', 'warn');
+    if (!segmentTerms.length) return toast('Informe ao menos um termo do segmento', 'warn');
+
+    const r = await fetch('/api/apify/batch/start', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({
+            actorId: document.getElementById('apify-actor').value.trim(),
+            outputCSV: document.getElementById('apify-csv').value.trim(),
+            input,
+            segmentTerms,
+            regions,
+            maxRuns: parseInt(document.getElementById('apify-max-runs').value) || regions.length
+        })
+    });
+    const d = await r.json();
+    if (!r.ok) return toast(d.error || 'Erro ao iniciar lote', 'err');
+    updateApifyBatch(d.batch);
+    toast('Lote da Apify iniciado', 'ok');
+}
+async function stopApifyBatch() {
+    const r = await fetch('/api/apify/batch/stop', { method:'POST' });
+    const d = await r.json();
+    if (!r.ok) return toast(d.error || 'Erro ao parar lote', 'err');
+    updateApifyBatch(d.batch);
+    toast('Parada solicitada', 'warn');
+}
+function updateApifyBatch(batch) {
+    if (!batch) return;
+    document.getElementById('apify-batch-status').textContent = batch.status || 'idle';
+    const parts = [
+        batch.currentRegion ? `região: ${batch.currentRegion}` : null,
+        batch.processedRegions != null ? `${batch.processedRegions}/${(batch.regions || []).length} regiões` : null,
+        batch.imported != null ? `${batch.imported} leads novos` : null,
+        batch.error ? `erro: ${batch.error}` : null
+    ].filter(Boolean);
+    document.getElementById('apify-batch-detail').textContent = parts.join(' • ') || 'Nenhuma rodada em execução';
 }
 
 function openHistory() {
